@@ -8,7 +8,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
 from textblob import TextBlob
-
+import nest_asyncio
+import uvicorn
 
 logger = logging.getLogger("stablecoin_news")
 logging.basicConfig(level=logging.INFO)
@@ -148,12 +149,14 @@ def fetch_and_filter_articles() -> List[Dict]:
     seen_titles = set()
 
     for source, url in RSS_FEEDS.items():
+        print("cccccccc", url)
         try:
             feed = feedparser.parse(url)
         except Exception as exc:  # pragma: no cover - network errors
             logger.warning("Failed to fetch %s: %s", source, exc)
             continue
 
+        print("no of entries", len(feed.entries))
         for entry in feed.entries:
             title = entry.get("title", "").strip()
             if not title or title.lower() in seen_titles:
@@ -184,6 +187,7 @@ def fetch_and_filter_articles() -> List[Dict]:
                 "sentiment": sentiment,
                 "fetched_at": datetime.utcnow().isoformat(),
             }
+            print("arrr", article)
             articles.append(article)
             seen_titles.add(title.lower())
 
@@ -229,4 +233,8 @@ async def shutdown_event():
 def get_positive_news():
     with article_lock:
         return {"count": len(curated_articles), "articles": curated_articles}
+    
+
+nest_asyncio.apply()
+uvicorn.run(app, port=8001)
 

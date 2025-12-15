@@ -3,4 +3,4 @@ uvicorn[standard]
 feedparser
 apscheduler
 textblob
-
+nest_asyncio
