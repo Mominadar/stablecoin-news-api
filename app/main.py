@@ -2,17 +2,29 @@ import logging
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Dict, List
-
-import feedparser
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
+import requests
 from textblob import TextBlob
 import nest_asyncio
 import uvicorn
+import xml.etree.ElementTree as ET
+from dotenv import load_dotenv
+import os
+from pymongo import MongoClient
+
+from utils import parse_description
+
+load_dotenv()
 
 logger = logging.getLogger("stablecoin_news")
 logging.basicConfig(level=logging.INFO)
+
+
+client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"))
+db = client[os.getenv("MONGODB_DB_NAME", "news_db")]
+mongo_db_client = db[os.getenv("MONGODB_COLLECTION_NAME", "articles")]
 
 STABLECOIN_KEYWORDS = [
     "stablecoin",
@@ -94,19 +106,10 @@ RSS_FEEDS = {
     "CoinDesk": "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "Cointelegraph": "https://cointelegraph.com/rss",
     "CryptoSlate": "https://cryptoslate.com/feed/",
-    "IMF Fintech": "https://www.imf.org/external/rss/feeds.aspx?category=FINTECH",
-    "BIS Innovation Hub": "https://www.bis.org/bcbs/rss/index.xml",
     "ECB News": "https://www.ecb.europa.eu/rss/press.xml",
-    "FATF News": "https://www.fatf-gafi.org/rss/en/morenews/",
-    "Treasury FinCEN": "https://home.treasury.gov/rss/finCEN",
     "Chainalysis": "https://blog.chainalysis.com/rss/",
     "Elliptic": "https://www.elliptic.co/blog/rss.xml",
-    "TRM Labs": "https://www.trmlabs.com/blog?format=rss",
-    "BIS Speeches": "https://www.bis.org/list/speeches_rss.page",
-    "MAS News": "https://www.mas.gov.sg/rss?type=all",
     "FCA News": "https://www.fca.org.uk/news/rss.xml",
-    "HKMA News": "https://www.hkma.gov.hk/media/eng/rss/rss.xml",
-    "OFAC Updates": "https://home.treasury.gov/rss/press-center/press-releases",
 }
 
 
@@ -149,22 +152,38 @@ def fetch_and_filter_articles() -> List[Dict]:
     seen_titles = set()
 
     for source, url in RSS_FEEDS.items():
-        print("cccccccc", url)
-        try:
-            feed = feedparser.parse(url)
-        except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("Failed to fetch %s: %s", source, exc)
-            continue
+        print("Running for Source", url)
+        response = requests.get(url)
+        response.raise_for_status()   # ensure request succeeded
 
-        print("no of entries", len(feed.entries))
-        for entry in feed.entries:
-            title = entry.get("title", "").strip()
+        # Parse XML text
+        root = ET.fromstring(response.text)
+        channel = root.find("channel")
+
+        # Get all <item> tags
+        items = channel.findall("item")
+
+        print("Found", len(items), "items")
+        for item in items:
+            title = item.find("title").text if item.find("title") is not None else None
             if not title or title.lower() in seen_titles:
                 continue
 
-            summary = entry.get("summary", "").strip()
-            content_for_filter = f"{title} {summary}"
+            link = item.find("link").text if item.find("link") is not None else None
+            summary = item.find("description").text if item.find("description") is not None else None
+            summary, image_url = parse_description(summary)
+            
+            print("setting summary", summary)
 
+            pubDate = item.find("pubDate").text if item.find("pubDate") is not None else None
+            
+            ns = {"media": "http://search.yahoo.com/mrss/"}
+
+            image = item.find("media:content",ns) if item.find("media:content",ns) is not None else None
+            if image is not None:
+                image_url = image.attrib.get("url")
+
+            content_for_filter = f"{title} {summary}"
             if not includes_stablecoin_keyword(content_for_filter):
                 continue
 
@@ -181,16 +200,16 @@ def fetch_and_filter_articles() -> List[Dict]:
             article = {
                 "title": title,
                 "summary": summary,
-                "url": entry.get("link", "").strip(),
+                "url": link,
+                'image_url': image_url,
                 "source": source,
-                "published": entry.get("published", datetime.utcnow().isoformat()),
+                "published": pubDate,
                 "sentiment": sentiment,
                 "fetched_at": datetime.utcnow().isoformat(),
             }
-            print("arrr", article)
             articles.append(article)
             seen_titles.add(title.lower())
-
+        
     return articles
 
 
@@ -205,13 +224,13 @@ def update_articles():
             if datetime.fromisoformat(article.get("fetched_at", datetime.utcnow().isoformat()))
             >= cutoff
         ]
-        existing_titles = {article["title"].lower() for article in curated_articles}
-        for article in new_articles:
-            title_key = article["title"].lower()
-            if title_key in existing_titles:
-                continue
-            curated_articles.append(article)
-            existing_titles.add(title_key)
+    
+    for article in new_articles:
+        mongo_db_client.find_one_and_update(
+            {"title": article["title"], "source": article["source"]},
+            {"$set": article},
+            upsert=True,)
+
     logger.info("Stored %d articles", len(new_articles))
 
 
