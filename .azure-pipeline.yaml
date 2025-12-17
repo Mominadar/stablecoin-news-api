@@ -1,0 +1,53 @@
+trigger:
+  branches:
+    include:
+      - deploy
+  paths:
+    include:
+      - '*'
+      
+variables:
+- name: registryServiceConnection
+  value: 'uniappsoijuniper'
+- name: kubernetesServiceConnection
+  value: 'Juniper-DEV-uni-apps-aks-dev-ictd-oi-juniper-dev-1683649275406'
+- name: namespace
+  value: 'ictd-oi-juniper-dev'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+
+- script: pip install -r requirements.txt
+  displayName: 'Install Dependencies'
+
+- task: Docker@2
+  displayName: 'Build and Push Docker image'
+  inputs:
+    containerRegistry: $(registryServiceConnection)
+    repository: 'juniper-stable-coins-news-dev'
+    command: 'buildAndPush'
+    Dockerfile: '**/Dockerfile'
+    tags: latest,$(Build.BuildNumber)
+
+- task: Kubernetes@1
+  inputs:
+    kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+    namespace: $(namespace)
+    command: 'login'
+
+- script: |
+      IMAGE_NAME="uniappsoijuniper.azurecr.io/juniper-stable-coins-news-dev:$(Build.BuildNumber)"
+      echo "##vso[task.setvariable variable=IMAGE_NAME]$IMAGE_NAME"
+  displayName: 'Set image name variable'
+
+- bash: |
+        
+        sudo apt-get update
+        sudo apt-get install -y gettext
+
+        envsubst < cronjob.yaml  | kubectl apply -f -
+        
+  displayName: 'apply configuration'
+    

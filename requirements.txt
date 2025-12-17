@@ -1,6 +1,6 @@
-fastapi
-uvicorn[standard]
-feedparser
 apscheduler
 textblob
-nest_asyncio
+bs4
+requests
+python_dotenv
+pymongo

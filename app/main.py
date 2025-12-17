@@ -2,13 +2,8 @@ import logging
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Dict, List
-from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI
-from fastapi.concurrency import run_in_threadpool
 import requests
 from textblob import TextBlob
-import nest_asyncio
-import uvicorn
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 import os
@@ -22,9 +17,9 @@ logger = logging.getLogger("stablecoin_news")
 logging.basicConfig(level=logging.INFO)
 
 
-client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"))
-db = client[os.getenv("MONGODB_DB_NAME", "news_db")]
-mongo_db_client = db[os.getenv("MONGODB_COLLECTION_NAME", "articles")]
+client = MongoClient(os.getenv("DB_URL", "mongodb://localhost:27017/"))
+db = client[os.getenv("DB_NAME", "juniper")]
+mongo_db_client = db["articles"]
 
 STABLECOIN_KEYWORDS = [
     "stablecoin",
@@ -112,14 +107,6 @@ RSS_FEEDS = {
     "FCA News": "https://www.fca.org.uk/news/rss.xml",
 }
 
-
-curated_articles: List[Dict] = []
-article_lock = Lock()
-scheduler = BackgroundScheduler(timezone="UTC")
-
-app = FastAPI(title="Stablecoin Positive News API", version="1.0.0")
-
-
 def includes_stablecoin_keyword(text: str) -> bool:
     lowered = text.lower()
     return any(keyword in lowered for keyword in STABLECOIN_KEYWORDS)
@@ -152,7 +139,7 @@ def fetch_and_filter_articles() -> List[Dict]:
     seen_titles = set()
 
     for source, url in RSS_FEEDS.items():
-        print("Running for Source", url)
+        logger.info(f"Running for Source {url}")
         response = requests.get(url)
         response.raise_for_status()   # ensure request succeeded
 
@@ -163,7 +150,7 @@ def fetch_and_filter_articles() -> List[Dict]:
         # Get all <item> tags
         items = channel.findall("item")
 
-        print("Found", len(items), "items")
+        logger.info(f"Found {len(items)} items")
         for item in items:
             title = item.find("title").text if item.find("title") is not None else None
             if not title or title.lower() in seen_titles:
@@ -172,9 +159,7 @@ def fetch_and_filter_articles() -> List[Dict]:
             link = item.find("link").text if item.find("link") is not None else None
             summary = item.find("description").text if item.find("description") is not None else None
             summary, image_url = parse_description(summary)
-            
-            print("setting summary", summary)
-
+        
             pubDate = item.find("pubDate").text if item.find("pubDate") is not None else None
             
             ns = {"media": "http://search.yahoo.com/mrss/"}
@@ -216,44 +201,24 @@ def fetch_and_filter_articles() -> List[Dict]:
 def update_articles():
     logger.info("Refreshing stablecoin articles")
     new_articles = fetch_and_filter_articles()
-    with article_lock:
-        cutoff = datetime.utcnow() - timedelta(hours=CACHE_WINDOW_HOURS)
-        curated_articles[:] = [
-            article
-            for article in curated_articles
-            if datetime.fromisoformat(article.get("fetched_at", datetime.utcnow().isoformat()))
-            >= cutoff
-        ]
+    logger.info("Storing %d articles", len(new_articles))
     
-    for article in new_articles:
+    cutoff = datetime.utcnow() - timedelta(hours=CACHE_WINDOW_HOURS)
+    curated_articles = [
+        article
+        for article in new_articles
+        if datetime.fromisoformat(article.get("fetched_at", datetime.utcnow().isoformat()))
+        >= cutoff
+    ]
+
+    for article in curated_articles:
         mongo_db_client.find_one_and_update(
-            {"title": article["title"], "source": article["source"]},
+            {"title": article["title"], "source": article["source"], "published": article["published"]},
             {"$set": article},
             upsert=True,)
-
+        
     logger.info("Stored %d articles", len(new_articles))
 
 
-@app.on_event("startup")
-async def startup_event():
-    if not scheduler.running:
-        scheduler.add_job(update_articles, "interval", hours=1, next_run_time=datetime.utcnow())
-        scheduler.start()
-    await run_in_threadpool(update_articles)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
-
-
-@app.get("/positive-news")
-def get_positive_news():
-    with article_lock:
-        return {"count": len(curated_articles), "articles": curated_articles}
-    
-
-nest_asyncio.apply()
-uvicorn.run(app, port=8001)
-
+if __name__ == "__main__":
+    update_articles()
